@@ -1,0 +1,141 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import L, X
+import comparisons
+import plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+"""
+##     ##    ###    #### ##    ## 
+###   ###   ## ##    ##  ###   ## 
+#### ####  ##   ##   ##  ####  ## 
+## ### ## ##     ##  ##  ## ## ## 
+##     ## #########  ##  ##  #### 
+##     ## ##     ##  ##  ##   ### 
+##     ## ##     ## #### ##    ## 
+"""
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Plots results. If multiple results/irl files provided each is plotted in its own figure."
+    )
+    parser.add_argument(
+        "-r",
+        "--result_dir",
+        type=str,
+        required=True,
+        nargs="+",
+        help="The result directory(ies) to plot.",
+    )
+    parser.add_argument(
+        "-i",
+        "--irl",
+        type=str,
+        required=True,
+        nargs="+",
+        help="The irl file(s) corresponding to result_dir(s).",
+    )
+    parser.add_argument(
+        "-gt",
+        "--ground_truth",
+        type=str,
+        nargs="+",
+        help="Ground truth values file (used for all plots).",
+    )
+    parser.add_argument(
+        "-hl",
+        "--hypo_limit",
+        type=int,
+        default=5,
+        help="Max number of hypotheses to plot if method provides multiple hypotheses in results.",
+    )
+    parser.add_argument(
+        "--is3d",
+        action="store_true",
+        help="Flag to indicate that the dataset is 3d (used for all plots).",
+    )
+
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Flag to indicate to save the image in the working directory.",
+    )
+    parser.add_argument(
+        "--legend",
+        action="store_true",
+        help="Flag to indicate to include a legend in the image.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = handle_args()
+    args.irl.sort()
+    args.result_dir.sort()
+    if args.ground_truth is not None:
+        args.ground_truth.sort()
+    for i, (rdir, irl_file) in enumerate(zip(args.result_dir, args.irl)):
+        irl_log = irl_types.Log.read(irl_file)
+        values_file_content = irl_parsing.parse_values_file(
+            os.path.join(rdir, "final_values.txt")
+        )
+        mode_file_content = irl_parsing.parse_modes_file(
+            os.path.join(rdir, "final_modes.txt")
+        )
+        if args.ground_truth is not None:
+            gt_values = irl_parsing.parse_values_file(
+                os.path.join(args.ground_truth[i], "final_values.txt")
+            )
+
+        x, y = [], []
+        i = 0
+        for (values, num_poses), modes in zip(values_file_content, mode_file_content):
+            p, r = comparisons.calc_precision_recall(modes, irl_log)
+            print("Precision: {}\tRecall: {}".format(p, r))
+
+            if args.is3d:
+                fig = plt.figure()
+                ax = plt.axes(projection="3d")
+            else:
+                figure = plt.figure(figsize=[8, 5])
+                ax = plt.gca()
+
+            if args.ground_truth is not None:
+                plot.plot_2d_gt_traj(ax, gt_values[0][0], "nonlinear")
+
+            plot.plot_posegraph_results(
+                ax, values, modes, irl_log, args.is3d, args.legend
+            )
+            plt.tight_layout()
+            print(os.path.basename(os.path.normpath(rdir)))
+            # plt.title(os.path.basename(os.path.normpath(rdir)) + " H:{}".format(i))
+            if not args.is3d:
+                ax.set_aspect("equal")
+            else:
+                plot.set_axes_equal(ax)
+            i += 1
+            if i >= args.hypo_limit:
+                break
+        if not args.is3d:
+            plt.gca().set_aspect("equal")
+
+        if args.save:
+            plt.savefig("trajectory.png", dpi=300)
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()

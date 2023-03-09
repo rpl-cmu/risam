@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import L, X
+import comparisons
+import plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+"""
+##     ##    ###    #### ##    ## 
+###   ###   ## ##    ##  ###   ## 
+#### ####  ##   ##   ##  ####  ## 
+## ### ## ##     ##  ##  ## ## ## 
+##     ## #########  ##  ##  #### 
+##     ## ##     ##  ##  ##   ### 
+##     ## ##     ## #### ##    ## 
+"""
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Computes precision and recall statistics on results."
+    )
+    parser.add_argument(
+        "-r",
+        "--result_dirs",
+        type=str,
+        required=True,
+        nargs="+",
+        help="The result directory(ies) to evaluate.",
+    )
+    parser.add_argument(
+        "-i",
+        "--irl_files",
+        type=str,
+        required=True,
+        nargs="+",
+        help="The irl file(s) corresponding to result_dir(s).",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = handle_args()
+    if len(args.irl_files) == 1:
+        irl_files = args.irl_files * len(args.result_dirs)
+    else:
+        irl_files = args.irl_files
+    n = len(args.result_dirs)
+
+    n = 0
+    total_precision = 0.0
+    total_recall = 0.0
+
+    for rdir, ifile in zip(sorted(args.result_dirs), sorted(irl_files)):
+        irl_log = irl_types.Log.read(ifile)
+        # print("-----\n", ifile, "\n", rdir)
+        values_file = os.path.join(rdir, "final_values.txt")
+        modes_file = os.path.join(rdir, "final_modes.txt")
+        if not os.path.isfile(values_file):
+            continue
+        vcontent = irl_parsing.parse_values_file(values_file)
+        mcontent = irl_parsing.parse_modes_file(modes_file)
+        if len(vcontent) == 0:
+            continue
+
+        values = vcontent[0][0]
+        modes = mcontent[0]
+
+        p, r = comparisons.calc_precision_recall(modes, irl_log)
+        n += 1
+        total_precision += p
+        total_recall += r
+    print(
+        "Avg Precision: {} , Avg Recall: {}".format(
+            total_precision / n, total_recall / n
+        )
+    )
+    print("{} & {}\\\\".format(total_precision / n, total_recall / n))
+
+
+if __name__ == "__main__":
+    main()

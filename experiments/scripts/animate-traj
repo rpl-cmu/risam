@@ -1,0 +1,123 @@
+#!/usr/bin/env python
+import argparse
+import glob
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import L, X
+
+import comparisons, plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+"""
+##     ##    ###    #### ##    ## 
+###   ###   ## ##    ##  ###   ## 
+#### ####  ##   ##   ##  ####  ## 
+## ### ## ##     ##  ##  ## ## ## 
+##     ## #########  ##  ##  #### 
+##     ## ##     ##  ##  ##   ### 
+##     ## ##     ## #### ##    ## 
+"""
+
+
+def handle_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-r",
+        "--results_dir",
+        type=str,
+        required=True,
+        help="Path to directory containing all values and modes files to animate. (e.g. the `interations` dir)",
+    )
+    parser.add_argument(
+        "-i",
+        "--irl",
+        type=str,
+        required=True,
+        help="Path to the IRL file from which the results are generated",
+    )
+    parser.add_argument(
+        "-s",
+        "--start_idx",
+        type=int,
+        default=0,
+        help="The file index to start the animation from",
+    )
+    parser.add_argument(
+        "-d",
+        "--delay",
+        type=float,
+        default=0.1,
+        help="The delay in seconds between each animated frame",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="If provided the program will save each animated frame into this directory.",
+    )
+    parser.add_argument(
+        "-k",
+        "--wait_for_key",
+        action="store_true",
+        help="If provided the animation will wait for key input between each frame.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = handle_args()
+
+    irl_log = irl_types.Log.read(args.irl)
+    is3d = irl_log.header.dim == 3
+    if is3d:
+        fig = plt.figure()
+        ax = plt.axes(projection="3d")
+    else:
+        figure = plt.figure(figsize=[6, 3])
+        ax = plt.gca()
+
+    count = 0
+    for val_file, mode_file in zip(
+        sorted(glob.glob(os.path.join(args.results_dir, "*_values.txt")))[
+            args.start_idx :
+        ],
+        sorted(glob.glob(os.path.join(args.results_dir, "*_modes.txt")))[
+            args.start_idx :
+        ],
+    ):
+        print(val_file)
+        all_values = irl_parsing.parse_values_file(val_file)
+        all_modes = irl_parsing.parse_modes_file(mode_file)
+        p, r = comparisons.calc_precision_recall(all_modes[0], irl_log)
+        print("iter:{} |Precision: {}, Recall: {}".format(count, p, r))
+        plot.plot_posegraph_results(ax, all_values[0][0], all_modes[0], irl_log, is3d)
+        if not is3d:
+            for i in range(1, len(all_modes)):
+                plot.plot_2d_gt_traj(ax, all_values[i][0], alpha=0.4, color="grey")
+
+        if is3d:
+            plot.set_axes_equal(ax)
+        plt.tight_layout()
+        plt.pause(args.delay)
+        if args.output is not None:
+            plt.savefig(os.path.join(args.output, "{:06d}.png".format(count)))
+        count += 1
+        if args.wait_for_key:
+            plt.waitforbuttonpress()
+        ax.clear()
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()

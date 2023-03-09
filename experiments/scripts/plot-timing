@@ -1,0 +1,73 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import L, X
+import comparisons
+import plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+"""
+##     ##    ###    #### ##    ## 
+###   ###   ## ##    ##  ###   ## 
+#### ####  ##   ##   ##  ####  ## 
+## ### ## ##     ##  ##  ## ## ## 
+##     ## #########  ##  ##  #### 
+##     ## ##     ##  ##  ##   ### 
+##     ## ##     ## #### ##    ## 
+"""
+
+
+def handle_args():
+    parser = argparse.ArgumentParser("Plots the iteration times for one or more methods.")
+    parser.add_argument(
+        "-i",
+        "--inputs",
+        type=str,
+        required=True,
+        nargs="+",
+        help="List of iteration_times.txt files to plot",
+    )
+    parser.add_argument(
+        "-n",
+        "--names",
+        type=str,
+        required=True,
+        nargs="+",
+        help="List of method names corresponding to inputs list",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = handle_args()
+    fig = plt.figure()
+    for in_file, name in zip(args.inputs, args.names):
+        with open(in_file) as f:
+            times = np.array(list(map(float, f.readlines()))) * 1e-3
+            smoothed_times = np.convolve(times, np.ones((10,)) / 10.0)
+            l = plt.plot(
+                np.arange(smoothed_times.shape[0]), smoothed_times, label=name
+            )[0]
+            plt.plot(np.arange(times.shape[0]), times, color=l.get_color(), alpha=0.3)
+    ax = plt.gca()
+    # ax.set_yscale("log")
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("Update Time (s)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()

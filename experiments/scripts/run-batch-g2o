@@ -1,0 +1,77 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import X
+from gtsam.utils import plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Runs a g2o scenario in batch (no outliers/ambiguity)."
+    )
+    parser.add_argument("-i", "--input", help="input file g2o format")
+    parser.add_argument("-o", "--output", help="Output file for Values")
+    parser.add_argument(
+        "-p", "--plot", action="store_true", help="Flag to plot results"
+    )
+    parser.add_argument("--is3d", action="store_true", help="PoseGraph is 3d")
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    args = handle_args()
+    graph, initial = gtsam.readG2o(args.input, args.is3d)
+
+    # Add prior on the pose having index (key) = 0
+    if args.is3d:
+        priorModel = gtsam.noiseModel.Diagonal.Variances(
+            np.array([1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8])
+        )
+        graph.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), priorModel))
+    else:
+        priorModel = gtsam.noiseModel.Diagonal.Variances(gtsam.Point3(1e-6, 1e-6, 1e-8))
+        graph.add(gtsam.PriorFactorPose2(0, gtsam.Pose2(), priorModel))
+
+    # Made convergence criteria tight to gget a good solution
+    params = gtsam.LevenbergMarquardtParams()
+    params.setMaxIterations(1000)
+    params.setRelativeErrorTol(1e-12)
+    params.setAbsoluteErrorTol(1e-12)
+    optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, params)
+    result = optimizer.optimize()
+
+    print("Optimization complete")
+    print("initial error = ", graph.error(initial))
+    print("final error = ", graph.error(result))
+
+    if args.output is None:
+        print("\nFactor Graph:\n{}".format(graph))
+        print("\nInitial Estimate:\n{}".format(initial))
+        # print("Final Result:\n{}".format(result))
+    else:
+        print("Writing results to file: ", args.output)
+        irl_parsing.write_values_file(
+            args.output, 3 if args.is3d else 2, "nonlinear", [result]
+        )
+        print("Done!")
+
+    if args.plot:
+        plot.plot_trajectory(0, result, 0.1)
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()

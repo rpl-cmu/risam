@@ -1,0 +1,465 @@
+#!/usr/bin/env python
+import argparse
+import os
+import random
+import sys
+from collections import namedtuple
+from datetime import datetime
+
+import gtsam
+import numpy as np
+from gtsam.symbol_shorthand import X
+from scipy.stats import chi2
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+"""
+######## ##    ## ########  ########  ######
+   ##     ##  ##  ##     ## ##       ##    ##
+   ##      ####   ##     ## ##       ##
+   ##       ##    ########  ######    ######
+   ##       ##    ##        ##             ##
+   ##       ##    ##        ##       ##    ##
+   ##       ##    ##        ########  ######
+"""
+Prior = namedtuple("Prior", "k pose")
+
+
+class Edge(namedtuple("Edge", "k1 k2 pose covariance is_outlier")):
+    def __lt__(self, other):
+        if self.k1 == other.k1:
+            return self.k2 > other.k2
+        else:
+            return self.k1 < other.k1
+
+    def __le__(self, other):
+        return self < other or self == other
+
+    def __eq__(self, other):
+        return (
+            self.k1 == other.k1
+            and self.k2 == other.k2
+            and self.pose == other.pose
+            and self.covariance == other.covariance
+            and self.is_outlier == other.is_outlier
+        )
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __gt__(self, other):
+        return not self <= other
+
+    def __ge__(self, other):
+        return not self < other
+
+
+"""
+ ######    #######   #######
+##    ##  ##     ## ##     ##
+##               ## ##     ##
+##   ####  #######  ##     ##
+##    ##  ##        ##     ##
+##    ##  ##        ##     ##
+ ######   #########  #######
+"""
+
+
+def parse_covariance_from_info(dim, info_tokens):
+    info_mat = np.zeros((dim, dim))
+    tidx = 0
+    for r in range(0, dim):
+        for c in range(r, dim):
+            # Fill in Upper triangle
+            val = float(info_tokens[tidx])
+            info_mat[r, c] = val
+            # Fill in lower triangle
+            if r != c:
+                info_mat[c, r] = val
+            tidx += 1
+    return np.linalg.inv(info_mat)
+
+
+def parse_edge_se2(tokens, is_outlier):
+    """
+    Parses a G2O SE(2) Edge line
+    EDGE_SE2 i j x y theta info(x, y, theta)
+    """
+    pose = gtsam.Pose2(float(tokens[3]), float(tokens[4]), float(tokens[5]))
+    cov = parse_covariance_from_info(3, tokens[6:])
+    # Make sure odom is i < j and loop is i > j
+    i, j = int(tokens[1]), int(tokens[2])
+    if i + 1 != j and i < j:
+        return Edge(j, i, pose.inverse(), cov, is_outlier)
+    else:
+        return Edge(i, j, pose, cov, is_outlier)
+
+
+def parse_edge_se3(tokens, is_outlier):
+    """
+    Parses a G2O SE(3) Edge line
+    EDGE_SE3:QUAT i j x y z qx qy qz qw info(x, y, z, Rx, Ry, Rz)
+    """
+    qx, qy, qz, qw = list(map(float, tokens[6:10]))
+    rot = gtsam.Rot3.Quaternion(qw, qx, qy, qz)
+    point = np.array(list(map(float, tokens[3:6])))
+    pose = gtsam.Pose3(rot, point)
+    cov = parse_covariance_from_info(6, tokens[10:])
+    # Make sure odom is i < j and loop is i > j
+    i, j = int(tokens[1]), int(tokens[2])
+    if i + 1 != j and i < j:
+        return Edge(j, i, pose.inverse(), cov, is_outlier)
+    else:
+        return Edge(i, j, pose, cov, is_outlier)
+
+
+def parse_prior_se2(tokens):
+    """
+    Parses a G2O SE(3) Vertex line
+    VERTEX_SE2 i x y theta
+    """
+    pose = gtsam.Pose2(float(tokens[2]), float(tokens[3]), float(tokens[4]))
+    return Prior(int(tokens[1]), pose)
+
+
+def parse_prior_se3(tokens):
+    """
+    Parses a G2O SE(3) Vertex line
+    VERTEX_SE3:QUAT i x y z qx qy qz qw
+    """
+    qx, qy, qz, qw = list(map(float, tokens[5:9]))
+    rot = gtsam.Rot3.Quaternion(qw, qx, qy, qz)
+    point = np.array(list(map(float, tokens[2:5])))
+    return Prior(int(tokens[1]), gtsam.Pose3(rot, point))
+
+
+def parse_g2o(file_path, is3d=False):
+    prior = None
+    edges = []
+
+    # Configure Parsers
+    if is3d:
+        edge_parser = parse_edge_se3
+        vertex_parser = parse_prior_se3
+    else:
+        edge_parser = parse_edge_se2
+        vertex_parser = parse_prior_se2
+
+    # Parse the file
+    with open(file_path) as f:
+        lines = f.readlines()
+
+        # Parse the prior from the first vertex line
+        prior = vertex_parser(lines[0].split(" "))
+
+        # Iterate through to parse all edges
+        for line in lines[1:]:
+            tokens = line.split(" ")
+
+            if tokens[0][0:4] == "EDGE":
+                is_outlier = tokens[0].split(":")[-1] == "OUTLIER"
+                edges.append(edge_parser(tokens, is_outlier))
+    return prior, edges
+
+
+"""
+#### ########  ##
+ ##  ##     ## ##
+ ##  ##     ## ##
+ ##  ########  ##
+ ##  ##   ##   ##
+ ##  ##    ##  ##
+#### ##     ## ########
+"""
+
+
+def edges_2_irl(name, prior, prior_sigma, edges, is3d):
+    dim = 3 if is3d else 2
+    cov_dim = 6 if is3d else 3
+
+    prior = irl_types.Prior(
+        1,
+        0,
+        X(prior.k),
+        [
+            irl_types.PoseMeasure(
+                dim, "nonlinear", prior.pose, np.eye(cov_dim) * prior_sigma
+            )
+        ],
+    )
+
+    entries = [prior]
+    for e in edges:
+        if e.k1 + 1 == e.k2:
+            entries.append(
+                irl_types.Odometry(
+                    1,
+                    0,
+                    X(e.k1),
+                    X(e.k2),
+                    [irl_types.PoseMeasure(dim, "nonlinear", e.pose, e.covariance)],
+                )
+            )
+        else:
+            entries.append(
+                irl_types.Loop(
+                    2,
+                    1 if e.is_outlier else 0,
+                    X(e.k1),
+                    [
+                        irl_types.LoopMeasure(
+                            dim, "nonlinear", X(e.k2), e.pose, e.covariance
+                        ),
+                        irl_types.NullHypo(),
+                    ],
+                )
+            )
+
+    header = irl_types.Header(
+        name, datetime.today().strftime("%Y-%m-%d"), dim, "nonlinear", "Add notes here."
+    )
+    log = irl_types.Log(header, entries)
+    return log
+
+
+"""
+ #######  ##     ## ######## ##       #### ######## ########   ######  
+##     ## ##     ##    ##    ##        ##  ##       ##     ## ##    ## 
+##     ## ##     ##    ##    ##        ##  ##       ##     ## ##       
+##     ## ##     ##    ##    ##        ##  ######   ########   ######  
+##     ## ##     ##    ##    ##        ##  ##       ##   ##         ## 
+##     ## ##     ##    ##    ##        ##  ##       ##    ##  ##    ## 
+ #######   #######     ##    ######## #### ######## ##     ##  ######  
+"""
+
+
+def solve_dataset(dataset_g2o, is3d, prior, prior_sigma):
+    graph, initial = gtsam.readG2o(dataset_g2o, is3d)
+
+    # Add prior on the pose having index (key) = 0
+    if is3d:
+        priorModel = gtsam.noiseModel.Diagonal.Variances(np.array([prior_sigma] * 6))
+        graph.add(gtsam.PriorFactorPose3(prior.k, prior.pose, priorModel))
+    else:
+        priorModel = gtsam.noiseModel.Diagonal.Variances(np.array([prior_sigma] * 3))
+        graph.add(gtsam.PriorFactorPose2(prior.k, prior.pose, priorModel))
+
+    # Made convergence criteria tight to get a good solution
+    params = gtsam.LevenbergMarquardtParams()
+    params.setMaxIterations(1000)
+    params.setRelativeErrorTol(1e-12)
+    params.setAbsoluteErrorTol(1e-12)
+    optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, params)
+    return optimizer.optimize()
+
+
+def generate_outliers(solution, num_loops, out_per, args):
+    outliers = []
+    num_outliers = int((out_per * num_loops) / (100.0 - out_per))
+    keys = np.array(solution.keys())
+    max_key = keys.max()
+    min_key = keys.min()
+    Pose = gtsam.Pose3 if args.is3d else gtsam.Pose2
+    if args.outlier_covariance is not None:
+        covariance = np.diag(args.outlier_covariance)
+    else:
+        covariance = np.diag([0.01] * (6 if args.is3d else 3))
+    thresh = chi2.ppf(args.outlier_chi2_thresh, 6 if args.is3d else 3)
+
+    group_info = (1, 0, 0)  # counter, last start key, last end key
+    group_size = args.group_size
+    while len(outliers) < num_outliers:
+        if (
+            group_info[0] < group_size
+            and group_info[1] < max_key
+            and group_info[2] < max_key
+            and len(outliers) > 0
+        ):
+            outliers.append(
+                Edge(group_info[1] + 1, group_info[2] + 1, Pose(), covariance, True)
+            )
+            group_info = (group_info[0] + 1, group_info[1] + 1, group_info[2] + 1)
+        else:
+            search = True
+            while search:
+                sk = np.random.randint(min_key, max_key)
+                sp = solution.atPose3(sk) if args.is3d else solution.atPose2(sk)
+                ek = np.random.randint(min_key, max_key)
+                ep = solution.atPose3(ek) if args.is3d else solution.atPose2(ek)
+
+                error_vec = Pose().localCoordinates(sp.inverse().compose(ep))
+                err = np.sqrt(error_vec.T @ np.linalg.inv(covariance) @ error_vec)
+                dist = np.linalg.norm(sp.inverse().compose(ep).translation())
+                search = (
+                    err < thresh  # Add only outliers
+                    or (args.close_outliers and dist > args.close_radius)  # close
+                    or abs(sk - ek) < 2  # Add only loop closures no odometry
+                )
+            if sk < ek:
+                sk, ek = ek, sk
+            outliers.append(Edge(sk, ek, Pose(), covariance, True))
+            if args.mixed:
+                group_size = random.choice([1, args.group_size])
+            group_info = (1, sk, ek)
+    return outliers
+
+
+def generate_outlier_name(args, out_per, i):
+    outlier_type = "close" if args.close_outliers else "random"
+    if args.mixed:
+        outlier_type += "_mixed"
+    elif args.group_size > 1:
+        outlier_type += "_groups"
+    return "{}_{}_{}_{}".format(args.name, out_per, outlier_type, i)
+
+
+"""
+##     ##    ###    #### ##    ##
+###   ###   ## ##    ##  ###   ##
+#### ####  ##   ##   ##  ####  ##
+## ### ## ##     ##  ##  ## ## ##
+##     ## #########  ##  ##  ####
+##     ## ##     ##  ##  ##   ###
+##     ## ##     ## #### ##    ##
+"""
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Converts a g2o dataset into IRL format. Optionally adds outlier measurements. Can be configured to add various types of outliers."
+    )
+    parser.add_argument(
+        "-i",
+        "--input",
+        type=str,
+        required=True,
+        help="The g2o file to convert to an irl file.",
+    )
+    parser.add_argument(
+        "-n",
+        "--name",
+        type=str,
+        required=True,
+        help="The human readable name of the dataset.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        required=True,
+        help="The directory in which the output file(s) will be saved.",
+    )
+    parser.add_argument(
+        "--is3d",
+        action="store_true",
+        help="Flag indicating that the input g2o file contains a 3d dataset.",
+    )
+    parser.add_argument(
+        "--prior-sigma",
+        type=float,
+        default=1e-1,
+        help="The standard deviation used for the isotropic noise model on the prior pose. Required because g2o files do no encode priors.",
+    )
+
+    parser.add_argument(
+        "--add_outliers",
+        action="store_true",
+        help="Add outlier measurements to the generated dataset",
+        default=False,
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        help="The number of unique random outlier datasets to generate",
+        default=1,
+    )
+    parser.add_argument(
+        "--close_outliers",
+        action="store_true",
+        help="Weather or not to only add `close` outliers",
+        default=False,
+    )
+    parser.add_argument(
+        "--close_radius",
+        type=float,
+        help="The radius used to determine a `close` outlier",
+        default=10,
+    )
+    parser.add_argument(
+        "--group_size",
+        type=int,
+        help="The number of outliers to add in a group",
+        default=1,
+    )
+    parser.add_argument(
+        "--mixed",
+        action="store_true",
+        help="Used Mixed Outliers (both random and groups)",
+    )
+    parser.add_argument(
+        "--outlier_percentiles",
+        type=int,
+        nargs="+",
+        help="The outlier percentile ex. 10, 20, etc",
+        default=[10],
+    )
+    parser.add_argument(
+        "--outlier_covariance",
+        type=float,
+        nargs="+",
+        help="The diagonal of the covariance i.e. [1, 2, 3] to use for outlier loop closures",
+        default=None,
+    )
+    parser.add_argument(
+        "--outlier_chi2_thresh",
+        type=float,
+        help="The chi2 threshold used to check that randomly generated measurements are in fact outliers",
+        default=0.99,
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = handle_args()
+
+    # read
+    prior, edges = parse_g2o(args.input, args.is3d)
+
+    # Sort into temporal order
+    edges.sort()
+
+    num_loops = 0
+    for e in edges:
+        if e.k1 + 1 != e.k2:
+            num_loops += 1
+
+    # write
+    if not os.path.exists(args.output):
+        os.mkdir(args.output)
+    if args.add_outliers:
+        for op in args.outlier_percentiles:
+            out_dir = os.path.join(args.output, str(op))
+            if not os.path.exists(out_dir):
+                os.mkdir(out_dir)
+            for i in range(args.repeats):
+                solution = solve_dataset(args.input, args.is3d, prior, args.prior_sigma)
+                outlier_name = generate_outlier_name(args, op, i)
+                outliers = generate_outliers(solution, num_loops, op, args)
+                all_edges = edges + outliers
+                all_edges.sort()
+                outlier_log = edges_2_irl(
+                    outlier_name, prior, args.prior_sigma, all_edges, args.is3d
+                )
+                outlier_log.write(os.path.join(out_dir, outlier_name + ".irl"))
+    else:
+        log = edges_2_irl(args.name, prior, args.prior_sigma, edges, args.is3d)
+        log.write(os.path.join(args.output, "{}.irl".format(args.name)))
+
+
+if __name__ == "__main__":
+    main()

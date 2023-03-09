@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import L, X
+import comparisons
+import plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+"""
+##     ##    ###    #### ##    ## 
+###   ###   ## ##    ##  ###   ## 
+#### ####  ##   ##   ##  ####  ## 
+## ### ## ##     ##  ##  ## ## ## 
+##     ## #########  ##  ##  #### 
+##     ## ##     ##  ##  ##   ### 
+##     ## ##     ## #### ##    ## 
+"""
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Plots multiple results at once in the same figure."
+    )
+    parser.add_argument(
+        "-r",
+        "--result_dirs",
+        type=str,
+        required=True,
+        nargs="+",
+        help="List of result dirs to plot.",
+    )
+    parser.add_argument(
+        "-i",
+        "--irl_files",
+        type=str,
+        required=True,
+        nargs="+",
+        help="List of irl files corresponding to result dirs.",
+    )
+    parser.add_argument(
+        "-gt",
+        "--ground_truth",
+        type=str,
+        help="Ground truth values file (used for all plots).",
+    )
+    parser.add_argument(
+        "-t", "--title", type=str, default="Results", help="The title for the figure."
+    )
+    parser.add_argument(
+        "--is3d",
+        action="store_true",
+        help="Flag to indicate that the dataset is 3d (used for all plots).",
+    )
+    return parser.parse_args()
+
+
+def construct_grid(n: int, title: str):
+    width = int(np.ceil(np.sqrt(n)))
+    height = int(np.ceil(n / width))
+    fig, axes = plt.subplots(height, width)
+    fig.suptitle(title)
+    return fig, axes
+
+
+def main():
+    args = handle_args()
+    if len(args.irl_files) == 1:
+        irl_files = args.irl_files * len(args.result_dirs)
+    else:
+        irl_files = args.irl_files
+    n = len(args.result_dirs)
+    fig, axes = construct_grid(n, args.title)
+
+    if args.ground_truth is not None:
+        gt_values = irl_parsing.parse_values_file(args.ground_truth)[0][0]
+
+    for ax, rdir, ifile in zip(axes.flat, sorted(args.result_dirs), sorted(irl_files)):
+        irl_log = irl_types.Log.read(ifile)
+        # print("-----\n", ifile, "\n", rdir)
+        values_file = os.path.join(rdir, "final_values.txt")
+        modes_file = os.path.join(rdir, "final_modes.txt")
+        if not os.path.isfile(values_file):
+            continue
+        vcontent = irl_parsing.parse_values_file(values_file)
+        mcontent = irl_parsing.parse_modes_file(modes_file)
+        if len(vcontent) == 0:
+            continue
+
+        values = vcontent[0][0]
+        modes = mcontent[0]
+
+        p, r = comparisons.calc_precision_recall(modes, irl_log)
+
+        if args.ground_truth is not None:
+            plot.plot_2d_gt_traj(ax, gt_values)
+
+        plot.plot_posegraph_results(
+            ax, values, modes, irl_log, args.is3d, show_legend=False
+        )
+        ax.set_title(
+            os.path.basename(os.path.normpath(rdir))
+            + "\n Pre: {:.04f} Rec: {:.04f}".format(p, r)
+        )
+
+        if not args.is3d:
+            ax.set_aspect("equal")
+
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()

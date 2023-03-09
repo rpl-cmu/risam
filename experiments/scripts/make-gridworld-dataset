@@ -1,0 +1,185 @@
+#!/usr/bin/env python
+import argparse
+import os
+import sys
+from datetime import date
+import gtsam
+import numpy as np
+from gtsam.symbol_shorthand import X
+from scipy.stats import chi2
+
+this_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(this_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+import irl_types
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Generates a random grid-world pose graph dataset in irl format. "
+        + "Providing multiple noise models (translation and rotation are zipped together) "
+        + "and multiple outlier probabilities will result in generating many datasets "
+        + "from the cartesian product of noise models and outlier probabilities."
+    )
+    parser.add_argument(
+        "-o", "--output", type=str, required=True, help="Output Directory"
+    )
+    parser.add_argument(
+        "-ts",
+        "--translation_sigma",
+        type=float,
+        default=[0.01],
+        nargs="+",
+        help="Sigma (m) for x, y in odometry and prior. Zipped with rotation sigma (lengths must match).",
+    )
+    parser.add_argument(
+        "-rs",
+        "--rotation_sigma",
+        type=float,
+        default=[0.01],
+        nargs="+",
+        help="Sigma (degrees) for theta in odometry and prior. Zipped with translation sigma (lengths must match).",
+    )
+    parser.add_argument(
+        "-op",
+        "--outlier_prob",
+        type=float,
+        default=[0.1],
+        nargs="+",
+        help="Probability of outlier measurement at any step without a true loop closure. Cartesian product taken with noise values.",
+    )
+
+    parser.add_argument(
+        "-nr",
+        "--number_repeats_per_config",
+        type=int,
+        default=1,
+        help="Number of repeats per config. Config=Cartesian Prod of variances and outlier_probs",
+    )
+    parser.add_argument(
+        "-np",
+        "--number_poses",
+        type=int,
+        default=500,
+        help="Number of poses in the Pose Graph",
+    )
+    parser.add_argument(
+        "--outlier_chi2_thresh",
+        type=float,
+        help="The chi2 threshold used to check that randomly generated measurements are in fact outliers",
+        default=0.99,
+    )
+    parser.add_argument(
+        "--inlier_holdout_count",
+        type=int,
+        help="Number of poses required to pass before inliers are generated",
+        default=0,
+    )
+    return parser.parse_args()
+
+
+def gen_odom():
+    odom_options = [
+        gtsam.Pose2(1, 0, 0),  # Move forward
+        gtsam.Pose2(0, 0, np.pi / 2.0),  # Turn left
+        gtsam.Pose2(0, 0, -np.pi / 2.0),  # Turn right
+    ]
+    return np.random.choice(
+        odom_options, p=[0.7, 0.2, 0.1]
+    )  # Bias towards moving and going left
+
+
+def get_close_pose_idx(poses, current_pose):
+    cx, cy = current_pose.x(), current_pose.y()
+    ci = len(poses) - 1
+    for i, p in enumerate(poses):
+        x, y = p.x(), p.y()
+        if np.sqrt((x - cx) ** 2 + (y - cy) ** 2) < 2 and abs(i - ci) > 5:
+            return i
+    return None
+
+
+def generate_pose_graph(num_poses, op, ts, rs, chi2_thresh, inlier_holdout_count):
+    def make_noise():
+        return gtsam.Pose2(
+            np.random.normal(0, ts),
+            np.random.normal(0, ts),
+            np.random.normal(0, np.deg2rad(rs)),
+        )
+
+    thresh = chi2.ppf(chi2_thresh, 3)  # d=3 for 2d pose-graph
+    covariance = np.diag([ts ** 2, ts ** 2, np.deg2rad(rs) ** 2])
+    gt_poses = [gtsam.Pose2(0, 0, 0)]
+    entries = [
+        irl_types.Prior(
+            1,
+            0,
+            X(0),
+            [irl_types.PoseMeasure(2, "nonlinear", gtsam.Pose2(0, 0, 0), covariance)],
+        )
+    ]
+    for i in range(1, num_poses):
+        odom = gen_odom()
+        current_pose = gt_poses[-1].compose(odom)
+        m = irl_types.PoseMeasure(
+            2, "nonlinear", odom.compose(make_noise()), covariance
+        )
+        entries.append(irl_types.Odometry(1, 0, X(i - 1), X(i), [m]))
+        gt_poses.append(current_pose)
+
+        idx = get_close_pose_idx(gt_poses, current_pose)
+        if idx is not None and i > inlier_holdout_count:
+            delta = current_pose.inverse().compose(gt_poses[idx]).compose(make_noise())
+            m1 = irl_types.LoopMeasure(2, "nonlinear", X(idx), delta, covariance)
+            entries.append(irl_types.Loop(2, 0, X(i), [m1, irl_types.NullHypo()]))
+        elif np.random.rand() < op:
+            idx = np.random.randint(0, len(gt_poses))
+            if i > 300:
+                idx = i - 300
+            else:
+                continue
+            sp, ep = gt_poses[-1], gt_poses[idx]
+            error_vec = gtsam.Pose2().localCoordinates(
+                sp.inverse().compose(ep)
+            )  # Outlier measurement is always identity
+            residual = np.sqrt(error_vec.T @ np.linalg.inv(covariance) @ error_vec)
+
+            if residual > thresh:
+                m1 = irl_types.LoopMeasure(
+                    2, "nonlinear", X(idx), gtsam.Pose2(), covariance
+                )
+                entries.append(irl_types.Loop(2, 1, X(i), [m1, irl_types.NullHypo()]))
+    return entries
+
+
+def main():
+    args = handle_args()
+
+    for ts, rs in zip(args.translation_sigma, args.rotation_sigma):
+        for op in args.outlier_prob:
+            for i in range(args.number_repeats_per_config):
+                entries = generate_pose_graph(
+                    args.number_poses,
+                    op,
+                    ts,
+                    rs,
+                    args.outlier_chi2_thresh,
+                    args.inlier_holdout_count,
+                )
+                output_name = "GridWorld_ts{}_rs{}_op{}_{}.irl".format(ts, rs, op, i)
+                header = irl_types.Header(
+                    output_name.split(".irl")[0],
+                    date.today().strftime("%y-%m-%d"),
+                    2,
+                    "nonlinear",
+                    "GridWorld Dataset with Translation Sigma: {}, Rotation Sigma: {}, Outlier Probability: {} (repeat: {})".format(
+                        ts, rs, op, i
+                    ),
+                )
+                log = irl_types.Log(header, entries)
+                log.write(os.path.join(args.output, output_name))
+
+
+if __name__ == "__main__":
+    main()

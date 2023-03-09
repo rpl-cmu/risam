@@ -1,0 +1,6 @@
+[submodule "experiments/thirdparty/Kimera-RPGO"]
+	path = experiments/thirdparty/Kimera-RPGO
+	url = https://github.com/MIT-SPARK/Kimera-RPGO.git
+[submodule "experiments/thirdparty/dcsam"]
+	path = experiments/thirdparty/dcsam
+	url = https://github.com/MarineRoboticsGroup/dcsam.git

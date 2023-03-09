@@ -1,0 +1,56 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+import sys
+
+import gtsam
+import matplotlib.pyplot as plt
+import numpy as np
+from gtsam.symbol_shorthand import X
+from gtsam.utils import plot
+
+# OVERHEAD TO ACCESS IRL STUFF
+script_dir = os.path.dirname(__file__)
+irl_dir = os.path.join(script_dir, "..", "irl", "python")
+sys.path.append(irl_dir)
+import irl_parsing
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Converts the vertex values in a g2o file into a values.txt format."
+    )
+    parser.add_argument("-i", "--input", help="The g2o file.")
+    parser.add_argument("-o", "--output", help="The name of the desired output file")
+    parser.add_argument(
+        "-p",
+        "--plot",
+        action="store_true",
+        help="If provided the program will plot the values.",
+    )
+    parser.add_argument(
+        "--is3d",
+        action="store_true",
+        help="Flag to indicate that the g2o file contains a 3d pose-graph.",
+    )
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    args = handle_args()
+    graph, initial = gtsam.readG2o(args.input, args.is3d)
+
+    irl_parsing.write_values_file(
+        args.output, 3 if args.is3d else 2, "nonlinear", [initial]
+    )
+    print("Done!")
+
+    if args.plot:
+        plot.plot_trajectory(0, initial, 0.1)
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()

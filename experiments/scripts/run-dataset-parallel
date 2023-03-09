@@ -1,0 +1,126 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+import glob
+import multiprocessing as mp
+import subprocess
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BUILD_DIR = os.path.join(SCRIPT_DIR, "../", "../", "build")
+RUNNER = os.path.join(BUILD_DIR, "experiments", "run-experiment")
+
+
+def handle_args():
+    parser = argparse.ArgumentParser(
+        description="Parallelizes running methods on a dataset."
+        + " NOTE! Do not trust timing results from parallel running."
+        + " I have no idea how python multiprocessing will affect runtime accuracy."
+    )
+    parser.add_argument(
+        "--datasets", help="Path to dataset directrory", nargs="+", required=True
+    )
+    parser.add_argument(
+        "--results",
+        help="Path to output directory ORDER MUST MATCH --datasets",
+        nargs="+",
+        required=True,
+    )
+    parser.add_argument(
+        "--dims",
+        help="Dims for datasets ORDER MUST MATCH --datasets",
+        nargs="+",
+        type=int,
+        required=True,
+    )
+    parser.add_argument(
+        "--save_every_n",
+        help="Write Intermediate results rate for datasets ORDER MUST MATCH --datasets",
+        nargs="+",
+        type=int,
+        required=True,
+    )
+    parser.add_argument(
+        "--methods",
+        type=str,
+        nargs="+",
+        help="The methods to run on this dataset by factory name.",
+        required=True,
+    )
+    parser.add_argument(
+        "--outper",
+        type=str,
+        nargs="+",
+        help="The outlier percentages (i.e. 10) to run on this dataset",
+        required=True,
+    )
+    parser.add_argument(
+        "--nworkers", type=int, help="Number of pool workers to use", required=True
+    )
+
+    args = parser.parse_args()
+    return args
+
+
+def check_results_exist(method, dataset_file, output_dir):
+    # returns true if there are already results for this command
+    dataset_base = os.path.basename(dataset_file).split(".irl")[0]
+    matches = glob.glob(
+        os.path.join(
+            output_dir, dataset_base + "_" + method + "*" + "/final_values.txt"
+        )
+    )
+    if len(matches) > 0:
+        return True
+    else:
+        # check if there is a directory from a past failed exp and remove
+        old_dirs = glob.glob(
+            os.path.join(output_dir, dataset_base + "_" + method + "*/")
+        )
+        for od in old_dirs:
+            os.system("rm -rf {}".format(od))
+
+
+def worker(method, dataset_file, output_dir, save_every_n, is3d):
+    if check_results_exist(method, dataset_file, output_dir):
+        print("skipping: " + method + " + " + dataset_file)
+        return
+    log_file = os.path.join(
+        output_dir,
+        os.path.basename(dataset_file).split(".irl")[0] + "_{}_stdout.txt".format(method),
+    )
+    with open(log_file, "a") as outfile:
+        command = "{} -m {} -i {} -o {} -n {} {}".format(
+            RUNNER,
+            method,
+            dataset_file,
+            output_dir,
+            save_every_n,
+            "--is3d" if is3d else "",
+        )
+        subprocess.call(command.split(" "), stdout=outfile, stderr=outfile)
+
+
+args = handle_args()
+pool = mp.Pool(args.nworkers)
+for dataset_dir, result_dir, dim, save_every_n in zip(
+    args.datasets, args.results, args.dims, args.save_every_n
+):
+    for outlier_percent in args.outper:
+        subproblem_dir = os.path.join(dataset_dir, outlier_percent)
+        irl_files = glob.glob(subproblem_dir + "/*.irl")
+        irl_files.sort()
+        for dataset_file in irl_files:
+            for method in args.methods:
+                pool.apply_async(
+                    worker,
+                    args=(
+                        method,
+                        dataset_file,
+                        os.path.join(result_dir, outlier_percent),
+                        save_every_n,
+                        "--is3d" if dim == 3 else "",
+                    ),
+                )
+pool.close()
+pool.join()
