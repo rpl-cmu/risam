@@ -12,11 +12,11 @@ This package contains the implementation of the robust incremental Smoothing and
     year = 2023,
     booktitle = {Proc. IEEE Intl. Conf. on Robotics and Automation (ICRA)},
     address = {London, {GB}}
-    pages = {?--?}, % Note: To be determined
+    pages = {4157-4163},
 }
 ```
 
-This paper can be accessed via [arXiv](https://arxiv.org/abs/2209.14359) and will soon be up on IEEE Explore.
+This paper can be accessed via [arXiv](https://arxiv.org/abs/2209.14359) or on [IEEE Xplore](https://ieeexplore.ieee.org/document/10161438).
 
 riSAM is able to handle large amounts of outlier measurements (tested up to 90% outliers)
 <p align="center">
