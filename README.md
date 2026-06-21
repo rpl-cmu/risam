@@ -1,6 +1,8 @@
-# Robust Incremental Smoothing and Mapping (riSAM)
+# Robust Incremental Smoothing and Mapping (riSAM) [ DEPRECATED ]
 
- [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)  &nbsp;[<img src="media/rpl.png" height=20px>](https://rpl.ri.cmu.edu/)
+**This repository has been deprecated in favor of a new and improved implementation [riSAM-v2](https://github.com/rpl-cmu/risam-v2). The repository will continue to public indefinitely to document the implementation evaluated in our 2023 ICRA paper (see below), but we encourage all new users to use the improved implementation.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)  &nbsp;[<img src="media/rpl.png" height=20px>](https://rpl.ri.cmu.edu/)
 
 This package contains the implementation of the robust incremental Smoothing and Mapping (riSAM) algorithm (see `risam/`) as presented in our ICRA 2023 paper. If you use this package please cite our paper:
 
